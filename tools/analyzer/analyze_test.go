@@ -149,3 +149,15 @@ func TestUnreachedInjectionsAreReportedButNotExpected(t *testing.T) {
 		t.Fatalf("unreached must not count as loss: %+v", r.Alerts)
 	}
 }
+
+func TestUnknownOutcomeIsNeitherLossNorUnexpected(t *testing.T) {
+	e1 := exp("a", "shipping:biz", 502)
+	e1.Unknown = []Exp{biz}
+	e2 := exp("b", "shipping:biz", 502)
+	e2.Unknown = []Exp{biz}
+	r := Analyze("run", []Expected{e1, e2}, []Record{rec("a", "shipping", "ADDRESS_INVALID", "run", 200, time.Second)}, nil)
+	a := r.Alerts
+	if a.Unknown != 2 || a.UnknownSeen != 1 || a.Unexpected != 0 || a.Lost != 0 || a.Expected != 0 {
+		t.Fatalf("unknown handling wrong: %+v", a)
+	}
+}

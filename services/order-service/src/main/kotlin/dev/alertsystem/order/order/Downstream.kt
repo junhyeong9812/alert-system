@@ -58,7 +58,8 @@ private fun RestClient.RequestBodySpec.call(mapper: ObjectMapper): CallResult = 
         }
     }
 } catch (e: Exception) {
-    CallResult.Failed(e.javaClass.simpleName)
+    // 근본 원인 클래스를 남긴다: ConnectException(도달 못 함) vs HttpTimeoutException·IOException(결과 불명)
+    CallResult.Failed(generateSequence<Throwable>(e) { it.cause }.last().javaClass.simpleName)
 }
 
 @Component

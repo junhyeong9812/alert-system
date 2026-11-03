@@ -43,6 +43,19 @@ function reached(x, fault, status, body) {
   return body.reason === x.errorCode;
 }
 
+// 발생 여부를 응답으로 확정할 수 없는 경우를 분리한다.
+//  unreached: 대상 서비스에 연결조차 못 함(연결 거부) 또는 앞 단계에서 흐름이 끊김 → 실패 미발생
+//  unknown  : 타임아웃·연결 끊김 → 대상이 처리했는지 모름 (FL-01의 '결과 불명')
+function classify(x, fault, res, body) {
+  if (reached(x, fault, res.status, body)) return 'expect';
+  if (res.status === 0) return String(res.error || '').includes('refused') ? 'unreached' : 'unknown';
+  const reason = body.reason || '';
+  const prefix = `${x.service.toUpperCase()}_`;
+  if (x.errorCode === 'COMPENSATION_FAILED' || !reason.startsWith(prefix) || reason.startsWith(`${prefix}HTTP_`)) return 'unreached';
+  // 연결 거부·이름 해석 실패(컨테이너 중지)는 요청이 도달하지 않은 것. ClosedChannel·EOF·타임아웃은 처리됐을 수 있어 불명.
+  return /(ConnectException|UnresolvedAddressException|UnknownHostException)$/.test(reason) ? 'unreached' : 'unknown';
+}
+
 // weights: [[fault, weight], ...] — fault ''은 정상 요청
 export function pick(weights) {
   const total = weights.reduce((s, [, w]) => s + w, 0);
@@ -67,8 +80,9 @@ export function placeOrder(fault, stage) {
   // 응답이 실패(연결 거부 status 0 포함)해도 정답 행은 남긴다 (spec A2).
   console.log(JSON.stringify({
     type: 'expected', t, testRunId: RUN_ID, requestId, fault: fault || '', stage: stage || '',
-    expect: all.filter((x) => reached(x, fault, res.status, parsed)),
-    unreached: all.filter((x) => !reached(x, fault, res.status, parsed)),
+    expect: all.filter((x) => classify(x, fault, res, parsed) === 'expect'),
+    unreached: all.filter((x) => classify(x, fault, res, parsed) === 'unreached'),
+    unknown: all.filter((x) => classify(x, fault, res, parsed) === 'unknown'),
     status: res.status, durationMs: res.timings.duration,
   }));
   return res;

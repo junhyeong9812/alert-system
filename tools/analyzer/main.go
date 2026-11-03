@@ -68,8 +68,8 @@ func Markdown(r Report) string {
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "## 도메인 알림\n\n| 정답 | 미도달 주입 | 도달 | 유실 | coverage | 중복 | 예상 밖 | 사람이 본 알림 | 채널 거절 | e2e p50 | e2e p95 | e2e max |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
-	fmt.Fprintf(&b, "| %d | %d | %d | %d | %.2f%% | %d | %d | %d | %d | %.0fms | %.0fms | %.0fms |\n\n", a.Expected, a.Unreached, a.Delivered, a.Lost,
+	fmt.Fprintf(&b, "## 도메인 알림\n\n| 정답 | 미도달 주입 | 결과 불명(알림 도달) | 도달 | 유실 | coverage | 중복 | 예상 밖 | 사람이 본 알림 | 채널 거절 | e2e p50 | e2e p95 | e2e max |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	fmt.Fprintf(&b, "| %d | %d | %d (%d) | %d | %d | %.2f%% | %d | %d | %d | %d | %.0fms | %.0fms | %.0fms |\n\n", a.Expected, a.Unreached, a.Unknown, a.UnknownSeen, a.Delivered, a.Lost,
 		a.Coverage*100, a.Duplicates, a.Unexpected, a.Volume, a.Rejected, a.E2EMs.P50, a.E2EMs.P95, a.E2EMs.Max)
 	if len(a.ByFault) > 0 {
 		fmt.Fprintf(&b, "| 주입 | 정답 | 도달 |\n|---|---|---|\n")

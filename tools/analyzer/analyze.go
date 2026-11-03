@@ -27,6 +27,7 @@ type Expected struct {
 	Stage      string    `json:"stage"`
 	Expect     []Exp     `json:"expect"`
 	Unreached  []Exp     `json:"unreached"` // 주입했으나 대상 서비스에 도달하지 못해 실패가 발생하지 않은 건
+	Unknown    []Exp     `json:"unknown"`   // 타임아웃 등으로 발생 여부를 응답으로 확정할 수 없는 건
 	Status     int       `json:"status"`
 	DurationMs float64   `json:"durationMs"`
 }
@@ -86,7 +87,9 @@ type FaultStats struct {
 type AlertStats struct {
 	Expected      int                    `json:"expected"`
 	Unreached     int                    `json:"unreached"`
-	Delivered     int                    `json:"delivered"` // 정답 키 중 1회 이상 수락(200)된 수
+	Unknown       int                    `json:"unknown"`
+	UnknownSeen   int                    `json:"unknownDelivered"` // 결과 불명 건 중 알림이 도달한 수 (= 실제로 발생했던 실패)
+	Delivered     int                    `json:"delivered"`        // 정답 키 중 1회 이상 수락(200)된 수
 	Lost          int                    `json:"lost"`
 	Coverage      float64                `json:"coverage"`
 	Duplicates    int                    `json:"duplicates"` // 같은 키의 2번째 이후 수락
@@ -194,9 +197,13 @@ func Analyze(runID string, expected []Expected, records []Record, events []Event
 		fault string
 	}
 	want := map[string]exp{}
+	unknown := map[string]bool{}
 	a := AlertStats{ByFault: map[string]*FaultStats{}}
 	for _, e := range expected {
 		a.Unreached += len(e.Unreached)
+		for _, x := range e.Unknown {
+			unknown[key(e.RequestID, x.Service, x.ErrorCode)] = true
+		}
 		for _, x := range e.Expect {
 			k := key(e.RequestID, x.Service, x.ErrorCode)
 			want[k] = exp{e.T, e.Fault}
@@ -209,6 +216,7 @@ func Analyze(runID string, expected []Expected, records []Record, events []Event
 		}
 	}
 	a.Expected = len(want)
+	a.Unknown = len(unknown)
 
 	accepted := map[string]int{}
 	firstAccepted := map[string]time.Time{}
@@ -253,6 +261,10 @@ func Analyze(runID string, expected []Expected, records []Record, events []Event
 	for k, n := range accepted {
 		if n > 1 {
 			a.Duplicates += n - 1
+		}
+		if unknown[k] {
+			a.UnknownSeen++
+			continue
 		}
 		if _, ok := want[k]; !ok {
 			a.Unexpected++

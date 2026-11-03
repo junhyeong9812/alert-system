@@ -111,7 +111,12 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "1")
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(http.StatusText(status)))
+	// 실제 Slack 웹훅은 성공 시 본문 "ok"를 돌려준다 (Alertmanager는 본문이 ok가 아니면 실패로 처리).
+	if status == http.StatusOK {
+		_, _ = w.Write([]byte("ok"))
+	} else {
+		_, _ = w.Write([]byte(http.StatusText(status)))
+	}
 }
 
 func (s *Server) setMode(w http.ResponseWriter, r *http.Request) {

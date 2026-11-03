@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -51,6 +52,19 @@ func readRecords(t *testing.T, base string) []Record {
 		out = append(out, r)
 	}
 	return out
+}
+
+func TestSuccessBodyIsSlackCompatibleOk(t *testing.T) {
+	_, ts := newTestServer(t)
+	res, err := http.Post(ts.URL+"/webhook", "application/json", strings.NewReader(`{"text":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	if string(b) != "ok" {
+		t.Fatalf(`want body "ok" like Slack, got %q`, b)
+	}
 }
 
 func TestModesReturnExpectedStatus(t *testing.T) {

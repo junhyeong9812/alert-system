@@ -1,0 +1,32 @@
+# 변형 A: 운영 경로 알림은 알림 서비스를 거치지 않고 채널로 직접 (알림 서비스 장애와 실패 영역 분리)
+route:
+  receiver: slack
+  group_by: [alertname, job]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 30m
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: slack-and-email
+
+receivers:
+  - name: slack
+    slack_configs:
+      - api_url: http://mock-slack:8070/webhook
+        channel: "#ops"
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }} {{ .CommonLabels.job }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'
+  - name: slack-and-email
+    slack_configs:
+      - api_url: http://mock-slack:8070/webhook
+        channel: "#ops"
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }} {{ .CommonLabels.job }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }} {{ end }}'
+    email_configs:
+      - to: oncall@alert-system.local
+        from: alertmanager@alert-system.local
+        smarthost: mailpit:1025
+        require_tls: false
+        send_resolved: true
