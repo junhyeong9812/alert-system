@@ -1,0 +1,147 @@
+name: alert-system
+
+# 서비스 jar와 Go 바이너리는 호스트에서 빌드한 뒤 런타임 이미지에 복사한다 (디스크 예산, spec I9).
+# 빌드: scripts/build.sh
+
+x-spring-service: &spring-service
+  restart: unless-stopped
+  # A1 실측: 512m에서 product·order가 200 rps 중 메모리 한계에 도달 → 768m
+  mem_limit: 768m
+  cpus: 2
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-spring-env: &spring-env
+  DB_HOST: postgres
+  FAULT_INJECTION_ENABLED: "true"
+  NOTIFICATION_URL: http://notification-service:8084
+  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    mem_limit: 1g
+    command: postgres -c max_connections=200
+    environment:
+      POSTGRES_USER: alert
+      POSTGRES_PASSWORD: alert
+    volumes:
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alert"]
+      interval: 2s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  # 알림 서비스 → 생산자 콜백(ack · 재시도 명령) 경로. FI-14에서 ack 유실을 주입한다.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    restart: unless-stopped
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./infra/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "8474:8474"
+
+  mock-slack:
+    build: tools/mock-slack
+    restart: unless-stopped
+    volumes:
+      - mock-slack-data:/data
+    ports:
+      - "8070:8070"
+
+  order-service:
+    <<: *spring-service
+    # 오케스트레이터라 요청당 하위 HTTP 호출이 2~3회 — A1 실측(2cpu에서 CPU 포화) 후 상향
+    cpus: 4
+    build: services/order-service
+    environment:
+      <<: *spring-env
+      PRODUCT_URL: http://product-service:8082
+      SHIPPING_URL: http://shipping-service:8083
+      ALERT_CALLBACK_BASE_URL: http://toxiproxy:18081
+    ports:
+      - "8081:8081"
+
+  product-service:
+    <<: *spring-service
+    build: services/product-service
+    environment:
+      <<: *spring-env
+      ALERT_CALLBACK_BASE_URL: http://toxiproxy:18082
+    ports:
+      - "8082:8082"
+
+  shipping-service:
+    <<: *spring-service
+    build: services/shipping-service
+    environment:
+      <<: *spring-env
+      ALERT_CALLBACK_BASE_URL: http://toxiproxy:18083
+    ports:
+      - "8083:8083"
+
+  notification-service:
+    <<: *spring-service
+    build: services/notification-service
+    environment:
+      DB_HOST: postgres
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+      SLACK_WEBHOOK_URL: http://mock-slack:8070/webhook
+      MAIL_HOST: mailpit
+      RETRY_BATCH_INTERVAL_MS: ${RETRY_BATCH_INTERVAL_MS:-30000}
+      RETRY_BATCH_THRESHOLD: ${RETRY_BATCH_THRESHOLD:-10}
+    ports:
+      - "8084:8084"
+
+  # ── 운영 경로 (SG-01+ 변형, SY-01 서브셋) ──
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    profiles: ["obs"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+    ports:
+      - "9090:9090"
+
+  alertmanager:
+    image: prom/alertmanager:v0.33.1
+    profiles: ["obs"]
+    restart: unless-stopped
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./infra/alertmanager:/etc/alertmanager:ro
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: grafana/grafana:13.2.5
+    profiles: ["obs"]
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  mock-slack-data:
