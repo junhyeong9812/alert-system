@@ -43,6 +43,9 @@
 | 2026-11-03 | 결과 문서 `docs/04-experiments/results/phase1-sg01.md` + 원시 집계 `phase1-sg01-raw.md` | R8 해소 |
 | 2026-11-03 | 안전선 ② 테스트 재실행(`--rerun`) | order 10·product 4·shipping 8·notification 9 전부 통과 · go test analyzer·mock-slack ok · summarize-runs.py py_compile ok |
 | 2026-11-03 | 안전선 ①③④⑤⑥ | ① smoke = 수정 후 smoke 5종 + Phase 1 본 실행 ③ 09b2f53 이후 코드 diff = summarize-runs.py 신규 1파일(읽기 전용 집계) ④ 신규 저장소 기능 브랜치 — PR revert로 롤백, 데이터 마이그레이션 없음 ⑤ 외부 소비자 없는 신규 서비스·스키마, 공개 계약 영향 없음 ⑥ 반증: 유실 판정이 하네스 산물인가? → DB 공백과 독립 교차 일치(5=5), K0 100/100; 중복 0이 측정 누락인가? → FI-14 재발송 702건이 inbox received 2,156에 실재 |
+| 2026-11-03 | 결과 문서 수치 정정 (완료 요약 워커 지적) | L7 bullet '236건'(smoke 값) → Phase 1 '228~243건' |
+| 2026-11-03 | 사이클 마감 ①: docs/plans/NEXT.md 신규 · docs/measurement-log.md 신규 (워커 모델 opus 기록) | 완료 요약 = Opus 워커 작성, 스니펫 2건 메인 대조 일치 |
+| 2026-11-03 | 아카이브 보류(spec 범위에 study-note 아카이브 없음 — 사용자 범위 확인 필요) | 후보 6건 NEXT.md 보류·이월에 등재 · 원 식별자: alert-system, dev.alertsystem.*, order/product/shipping/notification-service, mock-slack |
 
 ## 리뷰 ledger (中↑)
 
@@ -78,4 +81,103 @@
 
 ## 완료 요약
 
-(마감 시 작성)
+Phase 0~1을 구현했다. 구성은 다음과 같다.
+- 4개 Spring Boot/Kotlin 서비스의 동기 REST 흐름과 장애 주입 훅
+- SG-01 원안 전체: msgId·alert_status·ack/FAILED 회신·ack 미수신 재발송·배치 카운트·재시도 명령·재전송 API
+- Go mock-slack·analyzer, k6 K0~K6 시나리오, 실험 러너·집계 스크립트
+- SG-01+: Prometheus·Alertmanager·Grafana, ServiceDown·HighErrorRate 규칙
+
+Phase 1 결과(각 시나리오 3회, 중앙값):
+- K0~K3: 유실 0, 중복 0.
+- **H1 채택**: FI-07에서 크래시 5회 = 유실 5 = DB 공백 5가 3/3 반복 모두 일치했다. 내부 '미확인' 지표에는 나타나지 않았다.
+- **H2 채택(제한적)**: 장애 60초 동안 채널 시도가 도착분의 1.7배였다. 복구 직후 30초 버킷은 평상시의 약 3배였고, 영향 건의 e2e p95는 56.4s였다.
+- **H3 이연**: 비교 대상인 SG-02가 아직 없다.
+- **L7 재현**: FI-14에서 생산자 `SENT` 잔류 234건(228/234/243)이 ack 콜백 실패 수와 같다. 알림 서비스에서는 전부 발송됐다.
+- **SG-01+**: ServiceDown을 46.2s에 감지했다. SG-01만으로는 감지 수단이 없다.
+
+결과 문서: `docs/04-experiments/results/phase1-sg01.md`.
+
+### 커밋 (main..HEAD, 마감 docs 커밋 제외)
+```
+1e4dd05 docs(experiments): Phase 1 SG-01·SG-01+ 실험 결과와 가설 판정
+6e1ace6 feat(harness): 실험 실행 결과를 시나리오별 중앙값·반복별 표로 집계하는 스크립트
+09b2f53 fix(sg01): 리뷰 반영 — ack 미수신 재발송, 실패 status 회신, 측정 정확도 보정
+8e1852f feat(obs): SG-01+ 운영 경로(Prometheus·Alertmanager·Grafana)와 측정 충실도 보정
+9392352 feat(harness): k6 시나리오, 정답 대조 analyzer, 실험 러너
+12e6662 feat(services): 동기 REST 흐름 4개 서비스와 SG-01 기준선, mock-slack, compose 인프라
+1208e85 docs(plans): Phase 0~1 하네스·기준선 요구사항 명세 및 작업 로그
+```
+변경 규모: 109 files, +6755 (전부 신규).
+
+### 핵심 diff (전부 신규 — HEAD 1e4dd05 실파일 복사, 워커 작성 · 메인 2건 대조 확인)
+① SG-01 생산자 송신. `alert_status`를 기록한 뒤 전송한다. 업무 커밋과 이 기록 사이가 dual-write 공백(L6)이다. `services/shipping-service/src/main/kotlin/dev/alertsystem/shipping/alerting/Alerting.kt:100-107`
+```kotlin
+        jdbc.sql(
+            """
+            insert into alert_status(msg_id, payload, status, retry_count, created_at, updated_at)
+            values (?, ?::jsonb, 'SENT', 0, now(), now())
+            """.trimIndent(),
+        ).params(payload.msgId, mapper.writeValueAsString(payload)).update()
+        client.send(payload)
+        if (ctx.has("dup-send")) client.send(payload) // FI-14: 같은 msgId 이중 전송
+```
+② ack 미수신 재발송(L1, 상한 maxResends). `Alerting.kt:115-119`
+```kotlin
+            update alert_status set ack_resend_count = ack_resend_count + 1, updated_at = now()
+            where msg_id in (
+                select msg_id from alert_status
+                where status = 'SENT' and ack_resend_count < ? and updated_at < now() - make_interval(secs => ?)
+                order by updated_at limit 200 for update skip locked
+```
+③ 알림 서비스 발송·회신과 재시도 배치 임계(초과 시). `services/notification-service/src/main/kotlin/dev/alertsystem/notification/dispatch/Dispatch.kt:76-79, 98-101`
+```kotlin
+        val delivered = results.all { it }
+        if (delivered) inbox.markSent(row.msgId) else inbox.markFailed(row.msgId)
+        val status = if (delivered) "ACKED" else "FAILED"
+        val acked = callbacks.ack(row.callbackUrl, row.msgId, status)
+```
+```kotlin
+    fun runOnce(): Int {
+        val failed = inbox.failed()
+        lastFailed.set(failed.size.toLong())
+        if (failed.size <= threshold) return 0
+```
+④ inbox 수신 dedup. 실제로 중복을 막는 장치이면서 L7 분기의 원인이다. `services/notification-service/src/main/kotlin/dev/alertsystem/notification/inbox/Inbox.kt:40-43`
+```sql
+            on conflict (msg_id) do update set
+                received_count = inbox.received_count + 1,
+                status = case when inbox.status = 'RETRY_REQUESTED' then 'RECEIVED' else inbox.status end,
+                updated_at = now()
+```
+⑤ analyzer 유실 판정(정답 대비 sink 수락 기록). `tools/analyzer/analyze.go:256-267`
+```go
+	for k, w := range want {
+		if accepted[k] > 0 {
+			a.Delivered++
+			a.ByFault[w.fault].Delivered++
+			e2e = append(e2e, float64(firstAccepted[k].Sub(w.at).Milliseconds()))
+		} else {
+			a.Lost++
+			if len(a.LostSamples) < 10 {
+				a.LostSamples = append(a.LostSamples, k)
+			}
+		}
+	}
+```
+
+### task 상태
+| task | 상태 |
+|------|------|
+| 01 골격 + compose + A1 smoke | 완료 — A1 반증 → mem 768m·order cpus 4·HTTP/1.1 |
+| 02 동기 REST 흐름 + 장애 주입 | 완료 |
+| 03 mock-slack | 완료 — 본문 `ok` 충실도 수정 |
+| 04 SG-01 원안 | 완료 — 서비스 테스트 31건 통과 |
+| 05 k6 + analyzer + I3 → Phase 0 | 완료 — K0 100/100, A2 실증 |
+| 06 SG-01+ obs | 완료 — ServiceDown FIRING→RESOLVED |
+| 07 smoke + Phase 1 ×3 + 결과 문서 | 완료 — H1·H2 채택, H3 이연 |
+| 08 듀얼 리뷰 + 안전선 + PR | 리뷰·안전선 ①~⑥ 완료 · **PR 생성은 사용자 확인 대기** |
+
+### 남은 항목
+- PR 생성(feat/phase0-1-harness-baseline → main)과 push는 사용자 확인 후 진행한다.
+- 열린 질문은 리뷰 ledger 끝에 있다. 채널 실패 운영 감지와 H3 판정은 NEXT.md N1·N2로 넘긴다.
+- 워커 packet: base 736d9b9 / HEAD 1e4dd05 / 읽은 파일 log·spec·결과문서·Alerting.kt·Dispatch.kt·Inbox.kt·analyze.go·harness.js / 읽기 전용 git·sed 명령만 실행.
