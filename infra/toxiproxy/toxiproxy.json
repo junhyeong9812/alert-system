@@ -1,0 +1,5 @@
+[
+  { "name": "order-callback", "listen": "0.0.0.0:18081", "upstream": "order-service:8081", "enabled": true },
+  { "name": "product-callback", "listen": "0.0.0.0:18082", "upstream": "product-service:8082", "enabled": true },
+  { "name": "shipping-callback", "listen": "0.0.0.0:18083", "upstream": "shipping-service:8083", "enabled": true }
+]

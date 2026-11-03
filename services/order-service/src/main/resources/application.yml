@@ -1,0 +1,58 @@
+server:
+  port: 8081
+
+app:
+  service-name: order
+
+spring:
+  application:
+    name: order-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/order_db
+    username: ${DB_USER:alert}
+    password: ${DB_PASSWORD:alert}
+    hikari:
+      maximum-pool-size: 20
+  sql:
+    init:
+      mode: always
+
+fault-injection:
+  enabled: ${FAULT_INJECTION_ENABLED:false}
+
+downstream:
+  product-url: ${PRODUCT_URL:http://localhost:8082}
+  shipping-url: ${SHIPPING_URL:http://localhost:8083}
+
+alert:
+  notification-url: ${NOTIFICATION_URL:http://localhost:8084}
+  ack-resend:
+    # ack 미수신 재발송 (원안 L1). 30초 대기, 최대 3회
+    timeout-seconds: ${ACK_RESEND_TIMEOUT_SECONDS:30}
+    max: ${ACK_RESEND_MAX:3}
+  callback-base-url: ${ALERT_CALLBACK_BASE_URL:http://localhost:8081}
+
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health,prometheus
+      path-mapping:
+        prometheus: metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        live:
+          include: livenessState
+        ready:
+          include: readinessState,db
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

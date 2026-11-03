@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: order
+    metrics_path: /metrics
+    static_configs: [{ targets: ["order-service:8081"] }]
+  - job_name: product
+    metrics_path: /metrics
+    static_configs: [{ targets: ["product-service:8082"] }]
+  - job_name: shipping
+    metrics_path: /metrics
+    static_configs: [{ targets: ["shipping-service:8083"] }]
+  - job_name: notification
+    metrics_path: /metrics
+    static_configs: [{ targets: ["notification-service:8084"] }]
