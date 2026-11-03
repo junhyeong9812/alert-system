@@ -15,7 +15,8 @@ EVENTS="$OUT/events.jsonl"
 : > "$EVENTS"
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
-event() { printf '{"t":"%s","event":"%s","detail":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "${2:-}" >> "$EVENTS"; log "event $1 ${2:-}"; }
+# event <name> [detail] [expect: 이 장애를 감지했다고 볼 운영 알림 제목 패턴]
+event() { printf '{"t":"%s","event":"%s","detail":"%s","expect":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$1" "${2:-}" "${3:-}" >> "$EVENTS"; log "event $1 ${2:-}"; }
 psql() { docker compose exec -T postgres psql -U alert -d "$1" -qAtc "$2"; }
 slack_mode() { curl -sf -X POST localhost:8070/_control/mode -d "{\"mode\":\"$1\"}" > /dev/null; }
 callbacks() { for p in order product shipping; do curl -sf -X POST "localhost:8474/proxies/${p}-callback" -d "{\"enabled\":$1}" > /dev/null; done; }
@@ -53,7 +54,8 @@ timeline() {
       sleep 60; event fault:callback-cut toxiproxy; callbacks false
       sleep 60; event recover:callback toxiproxy; callbacks true ;;
     obs-servicedown)
-      sleep 30; event fault:stop shipping-service; docker compose stop shipping-service > /dev/null
+      # FI-13 kill (SIGKILL). 재시작 정책이 바로 되살리지 않도록 kill 직후 stop 상태로 고정한다.
+      sleep 30; event fault:kill shipping-service "ServiceDown shipping"; docker compose kill shipping-service > /dev/null; docker compose stop shipping-service > /dev/null
       sleep 90; event recover:start shipping-service; docker compose start shipping-service > /dev/null ;;
   esac
 }
@@ -64,7 +66,15 @@ if [ "${SKIP_WARMUP:-0}" != 1 ]; then
   log "warmup ${WARMUP_DURATION:-120s}"
   k6 run -q -e RUN_ID="warmup-$RUN_ID" -e WARMUP_DURATION="${WARMUP_DURATION:-120s}" loadtest/k6/warmup.js > /dev/null 2>&1
 fi
+# 실행별 증분 계산용 카운터 스냅샷 (카운터는 프로세스 수명 동안 누적된다)
+counters() {
+  for p in 8081 8082 8083 8084; do
+    curl -s "localhost:$p/metrics" | grep -E '^(retry_commands_total|ack_total|notifier_send_total|alert_ack_resend_total|alert_send_total)' | sed "s/^/$p /"
+  done
+}
+
 reset_state
+counters > "$OUT/counters-start.txt"
 event run:start "$SCEN"
 
 K6_SCRIPT="loadtest/k6/${SCEN}.js"
@@ -84,6 +94,7 @@ log "cooldown ${COOLDOWN_SECONDS:-90}s"
 sleep "${COOLDOWN_SECONDS:-90}"
 wait_ready || true
 
+counters > "$OUT/counters-end.txt"
 curl -sf localhost:8070/_control/records > "$OUT/records.jsonl"
 {
   for db in order product shipping; do
@@ -105,6 +116,25 @@ curl -sf localhost:8070/_control/records > "$OUT/records.jsonl"
   for s in order-service product-service shipping-service notification-service; do
     echo "$s $(docker inspect -f '{{.RestartCount}}' "alert-system-$s-1")"
   done
+  # 하네스 아티팩트 판정용 카운터의 이번 실행 증분 (재시작된 프로세스는 시작값이 없어 종료값 그대로 — 과소 가능)
+  echo "## counter deltas (port metric delta)"
+  python3 - "$OUT/counters-start.txt" "$OUT/counters-end.txt" <<'PY'
+import sys
+def load(p):
+    d = {}
+    for line in open(p):
+        port, rest = line.strip().split(' ', 1)
+        metric, value = rest.rsplit(' ', 1)
+        d[(port, metric)] = float(value)
+    return d
+start, end = load(sys.argv[1]), load(sys.argv[2])
+for k in sorted(end):
+    delta = end[k] - start.get(k, 0.0)
+    if delta < 0:
+        delta = end[k]  # 프로세스 재시작으로 카운터가 리셋됨
+    if delta:
+        print(k[0], k[1], f"{delta:g}")
+PY
   echo "## emails (mailpit)"
   curl -s localhost:8025/api/v1/messages | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])"
 } > "$OUT/db-state.txt"

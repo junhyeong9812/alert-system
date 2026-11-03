@@ -25,6 +25,10 @@ fault-injection:
 
 alert:
   notification-url: ${NOTIFICATION_URL:http://localhost:8084}
+  ack-resend:
+    # ack 미수신 재발송 (원안 L1). 30초 대기, 최대 3회
+    timeout-seconds: ${ACK_RESEND_TIMEOUT_SECONDS:30}
+    max: ${ACK_RESEND_MAX:3}
   callback-base-url: ${ALERT_CALLBACK_BASE_URL:http://localhost:8083}
 
 management:

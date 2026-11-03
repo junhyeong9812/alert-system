@@ -34,10 +34,9 @@ export function expectedAlerts(fault) {
 
 // 정답은 "실패를 주입한 요청"이 아니라 "실패가 실제로 발생한 요청"이다.
 // 대상 서비스가 다운돼 요청이 도달하지 못하면 실패도 알림도 발생하지 않는다 → 응답의 자기 오류 코드로 발생 여부를 판정.
-// (응답 경로는 알림 경로와 독립이다. crash-after-commit은 응답이 없으므로 의도적 주입을 그대로 정답으로 둔다.)
+// (응답 경로는 알림 경로와 독립이다. crash-after-commit은 classify에서 연결 실패 유형으로 판정한다.)
 function reached(x, fault, status, body) {
   if (x.errorCode === 'COMPENSATION_FAILED') return body.status === 'COMPENSATION_FAILED';
-  if (parse(fault).some((d) => d.service === x.service && d.kind === 'crash-after-commit')) return true;
   if (x.service === 'order') return body.reason === x.errorCode && (x.errorCode !== 'TECH_ERROR' || status === 500);
   if (x.errorCode === 'TECH_ERROR') return body.reason === `${x.service.toUpperCase()}_HTTP_500`;
   return body.reason === x.errorCode;
@@ -46,14 +45,28 @@ function reached(x, fault, status, body) {
 // 발생 여부를 응답으로 확정할 수 없는 경우를 분리한다.
 //  unreached: 대상 서비스에 연결조차 못 함(연결 거부) 또는 앞 단계에서 흐름이 끊김 → 실패 미발생
 //  unknown  : 타임아웃·연결 끊김 → 대상이 처리했는지 모름 (FL-01의 '결과 불명')
+const UNREACHED = /(ConnectException|UnresolvedAddressException|UnknownHostException)$/;
+
 function classify(x, fault, res, body) {
+  // crash-after-commit: 대상에 도달했다면 커밋 후 프로세스가 죽어 연결이 끊긴다 → 실패 발생(정답).
+  // 연결 거부·이름 해석 실패(직전 크래시 후 재기동 중)면 도달하지 못해 크래시도 없었다.
+  if (parse(fault).some((d) => d.service === x.service && d.kind === 'crash-after-commit')) {
+    if (x.service === 'order') {
+      const err = String(res.error || '');
+      if (res.status !== 0 || err.includes('refused')) return 'unreached';
+      return err.includes('timeout') ? 'unknown' : 'expect';
+    }
+    const r = body.reason || '';
+    if (!r.startsWith(`${x.service.toUpperCase()}_`) || UNREACHED.test(r)) return 'unreached';
+    return r.endsWith('HttpTimeoutException') ? 'unknown' : 'expect';
+  }
   if (reached(x, fault, res.status, body)) return 'expect';
   if (res.status === 0) return String(res.error || '').includes('refused') ? 'unreached' : 'unknown';
   const reason = body.reason || '';
   const prefix = `${x.service.toUpperCase()}_`;
   if (x.errorCode === 'COMPENSATION_FAILED' || !reason.startsWith(prefix) || reason.startsWith(`${prefix}HTTP_`)) return 'unreached';
   // 연결 거부·이름 해석 실패(컨테이너 중지)는 요청이 도달하지 않은 것. ClosedChannel·EOF·타임아웃은 처리됐을 수 있어 불명.
-  return /(ConnectException|UnresolvedAddressException|UnknownHostException)$/.test(reason) ? 'unreached' : 'unknown';
+  return UNREACHED.test(reason) ? 'unreached' : 'unknown';
 }
 
 // weights: [[fault, weight], ...] — fault ''은 정상 요청

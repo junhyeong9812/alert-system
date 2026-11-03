@@ -1,7 +1,6 @@
 name: alert-system
 
-# 서비스 jar와 Go 바이너리는 호스트에서 빌드한 뒤 런타임 이미지에 복사한다 (디스크 예산, spec I9).
-# 빌드: scripts/build.sh
+# 이미지는 멀티스테이지로 빌드한다 (빌드 단계 → JRE/alpine 런타임, spec I9). 빌드: scripts/build.sh
 
 x-spring-service: &spring-service
   restart: unless-stopped

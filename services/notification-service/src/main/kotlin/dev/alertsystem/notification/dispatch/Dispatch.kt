@@ -17,9 +17,9 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
-// 생산자 콜백: 발송 성공 ack, 재시도 명령
+// 생산자 콜백: 발송 결과 ack {status: ACKED | FAILED} (원안 ② "ack {msgId, status}"), 재시도 명령
 interface CallbackClient {
-    fun ack(callbackUrl: String, msgId: UUID): Boolean
+    fun ack(callbackUrl: String, msgId: UUID, status: String): Boolean
     fun retry(callbackUrl: String, msgId: UUID): Boolean
 }
 
@@ -33,11 +33,12 @@ class HttpCallbackClient : CallbackClient {
         )
         .build()
 
-    override fun ack(callbackUrl: String, msgId: UUID) = call("$callbackUrl/alerts/$msgId/ack")
-    override fun retry(callbackUrl: String, msgId: UUID) = call("$callbackUrl/alerts/$msgId/retry")
+    override fun ack(callbackUrl: String, msgId: UUID, status: String) =
+        call("$callbackUrl/alerts/$msgId/ack", mapOf("status" to status))
+    override fun retry(callbackUrl: String, msgId: UUID) = call("$callbackUrl/alerts/$msgId/retry", null)
 
-    private fun call(url: String): Boolean = try {
-        client.post().uri(url).retrieve().toBodilessEntity()
+    private fun call(url: String, body: Any?): Boolean = try {
+        client.post().uri(url).apply { if (body != null) body(body) }.retrieve().toBodilessEntity()
         true
     } catch (e: Exception) {
         log.warn("callback failed url={} cause={}", url, e.message)
@@ -66,18 +67,17 @@ class Dispatcher(
     }
 
     private fun dispatch(row: InboxRow) {
-        val delivered = router.channelsFor(row.payload).all { channel ->
+        // 모든 채널을 각각 시도한다 (critical의 Slack 실패가 Email 시도를 막지 않도록). 전부 성공해야 SENT.
+        val results = router.channelsFor(row.payload).map { channel ->
             channel.send(row.payload).also {
                 registry.counter("notifier_send_total", "channel", channel.name, "result", if (it) "ok" else "error").increment()
             }
         }
-        if (delivered) {
-            inbox.markSent(row.msgId)
-            val acked = callbacks.ack(row.callbackUrl, row.msgId)
-            registry.counter("ack_total", "result", if (acked) "ok" else "error").increment()
-        } else {
-            inbox.markFailed(row.msgId)
-        }
+        val delivered = results.all { it }
+        if (delivered) inbox.markSent(row.msgId) else inbox.markFailed(row.msgId)
+        val status = if (delivered) "ACKED" else "FAILED"
+        val acked = callbacks.ack(row.callbackUrl, row.msgId, status)
+        registry.counter("ack_total", "status", status, "result", if (acked) "ok" else "error").increment()
     }
 }
 
@@ -94,11 +94,11 @@ class RetryBatch(
         Gauge.builder("retry_batch_failed_count", lastFailed) { it.get().toDouble() }.register(registry)
     }
 
-    // 원안: 실패 건수를 세어 임계치 이상이면 실패한 msgId마다 생산자에게 "재시도해라" 명령.
+    // 원안: 실패 건수를 세어 임계치를 초과하면 실패한 msgId마다 생산자에게 "재시도해라" 명령.
     fun runOnce(): Int {
         val failed = inbox.failed()
         lastFailed.set(failed.size.toLong())
-        if (failed.size < threshold) return 0
+        if (failed.size <= threshold) return 0
         failed.forEachParallel { (msgId, callbackUrl) ->
             if (!inbox.markRetryRequested(msgId)) return@forEachParallel
             val ok = callbacks.retry(callbackUrl, msgId)

@@ -120,6 +120,13 @@ func TestReadExpectedSkipsNoiseAndOtherRuns(t *testing.T) {
 	}
 }
 
+func TestSinkReadErrorsAreCountedNotIgnored(t *testing.T) {
+	r := Analyze("run", []Expected{exp("a", "", 201)}, []Record{{ReceivedAt: t0, Status: 400, Body: json.RawMessage(`"partial"`), Error: "unexpected EOF"}}, nil)
+	if r.SinkErrors != 1 {
+		t.Fatalf("sink read errors must be surfaced, got %d", r.SinkErrors)
+	}
+}
+
 func TestReadRecordsFailsLoudlyOnCorruptSink(t *testing.T) {
 	if _, err := ReadRecords(strings.NewReader("{not json}\n")); err == nil {
 		t.Fatal("corrupt sink record must be an error, not silently skipped")
@@ -127,17 +134,28 @@ func TestReadRecordsFailsLoudlyOnCorruptSink(t *testing.T) {
 }
 
 func TestOpsAlertsAndDetectionTime(t *testing.T) {
-	events := []Event{{T: t0, Event: "fault:stop", Detail: "shipping-service"}, {T: t0.Add(time.Hour), Event: "fault:stop", Detail: "never"}}
+	events := []Event{
+		{T: t0, Event: "fault:kill", Detail: "shipping-service", Expect: "ServiceDown shipping"},
+		{T: t0.Add(time.Hour), Event: "fault:kill", Detail: "never", Expect: "ServiceDown never"},
+		{T: t0, Event: "fault:channel-5xx", Detail: "no expectation"}, // 기대 패턴 없음 → 감지 대상 아님
+	}
 	r := Analyze("run", []Expected{exp("a", "", 201)},
-		[]Record{ops("[RESOLVED] ServiceDown", 10*time.Second), ops("[FIRING:1] ServiceDown shipping", 45*time.Second)}, events)
-	if len(r.Ops) != 2 {
-		t.Fatalf("want 2 ops alerts, got %d", len(r.Ops))
+		[]Record{
+			ops("[RESOLVED] ServiceDown", 10*time.Second),
+			ops("[FIRING:1] HighErrorRate order", 20*time.Second), // 다른 원인의 알림은 감지로 인정하지 않는다
+			ops("[FIRING:1] ServiceDown shipping", 45*time.Second),
+		}, events)
+	if len(r.Ops) != 3 {
+		t.Fatalf("want 3 ops alerts, got %d", len(r.Ops))
 	}
 	if r.Detections[0].Seconds == nil || *r.Detections[0].Seconds != 45 {
 		t.Fatalf("detection wrong: %+v", r.Detections[0])
 	}
 	if r.Detections[1].Seconds != nil {
 		t.Errorf("second event must be undetected: %+v", r.Detections[1])
+	}
+	if len(r.Detections) != 2 {
+		t.Errorf("events without expectation must not produce detections: %+v", r.Detections)
 	}
 }
 

@@ -31,6 +31,7 @@ type Record struct {
 	Mode       string          `json:"mode"`
 	Status     int             `json:"status"`
 	Body       json.RawMessage `json:"body"`
+	Error      string          `json:"error,omitempty"`
 }
 
 type Server struct {
@@ -74,20 +75,22 @@ func statusFor(m Mode) int {
 }
 
 func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	if !json.Valid(body) {
+	body, readErr := io.ReadAll(r.Body)
+	if readErr != nil || !json.Valid(body) {
 		raw, _ := json.Marshal(string(body))
 		body = raw
 	}
 	s.mu.Lock()
 	mode := s.mode
 	status := statusFor(mode)
+	if readErr != nil { // 본문 수신 도중 끊긴 요청도 기록한다 (spec I7)
+		status = http.StatusBadRequest
+	}
 	s.seq++
 	rec := Record{Seq: s.seq, ReceivedAt: s.timeNow().UTC(), Mode: mode.Mode, Status: status, Body: body}
+	if readErr != nil {
+		rec.Error = readErr.Error()
+	}
 	line, _ := json.Marshal(rec)
 	_, werr := s.writer.Write(append(line, '\n'))
 	if werr == nil {
@@ -102,6 +105,10 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if readErr != nil {
+		http.Error(w, "read error: "+readErr.Error(), status)
+		return
+	}
 	switch mode.Mode {
 	case "latency":
 		s.sleep(time.Duration(mode.LatencyMs) * time.Millisecond)

@@ -78,6 +78,9 @@ func Markdown(r Report) string {
 		}
 		b.WriteString("\n")
 	}
+	if r.SinkErrors > 0 {
+		fmt.Fprintf(&b, "⚠ sink 본문 수신 실패 기록 %d건 (어떤 알림인지 판별 불가 — 측정 불확실성)\n\n", r.SinkErrors)
+	}
 	if len(a.LostSamples) > 0 {
 		fmt.Fprintf(&b, "유실 샘플: %v\n\n", a.LostSamples)
 	}

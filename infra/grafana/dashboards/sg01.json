@@ -176,8 +176,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum by (result) (rate(ack_total[30s]))",
-          "legendFormat": "ack {{result}}"
+          "expr": "sum by (status, result) (rate(ack_total[30s]))",
+          "legendFormat": "ack {{status}} {{result}}"
         },
         {
           "refId": "C",

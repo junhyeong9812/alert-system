@@ -141,3 +141,22 @@ func TestResetClearsRecordsAndMode(t *testing.T) {
 		t.Errorf("seq should restart at 1: %+v", recs)
 	}
 }
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// spec I7: 본문 수신 도중 끊긴 요청도 기록한다.
+func TestBodyReadFailureIsRecordedAs400(t *testing.T) {
+	s, ts := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", failingReader{})
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("want 400, got %d", rr.Code)
+	}
+	recs := readRecords(t, ts.URL)
+	if len(recs) != 1 || recs[0].Status != 400 || recs[0].Error == "" {
+		t.Fatalf("read failure must be recorded: %+v", recs)
+	}
+}

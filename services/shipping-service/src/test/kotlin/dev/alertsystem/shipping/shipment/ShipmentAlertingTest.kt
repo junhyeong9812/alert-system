@@ -2,6 +2,7 @@ package dev.alertsystem.shipping.shipment
 
 import dev.alertsystem.shipping.PostgresTestConfig
 import dev.alertsystem.shipping.RecordingNotificationClient
+import dev.alertsystem.shipping.alerting.AlertReporter
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -45,14 +46,38 @@ abstract class ShipmentTestBase(
             .query(String::class.java).single()
 }
 
-@SpringBootTest(properties = ["fault-injection.enabled=true"])
+@SpringBootTest(properties = ["fault-injection.enabled=true", "alert.scheduling.enabled=false", "alert.ack-resend.max=2"])
 @AutoConfigureMockMvc
 @Import(PostgresTestConfig::class)
 class ShipmentAlertingTest @Autowired constructor(
     mvc: MockMvc,
     notifications: RecordingNotificationClient,
     jdbc: JdbcClient,
+    private val reporter: AlertReporter,
 ) : ShipmentTestBase(mvc, notifications, jdbc) {
+
+    private fun ageAlerts() = jdbc.sql("update alert_status set updated_at = now() - interval '5 minutes'").update()
+
+    @Test
+    fun `T-P6 unacked alert is resent with the same msgId until the cap, acked one is not`() {
+        create("shipping:tech")
+        val msgId = notifications.sent.single().msgId
+        assertEquals(0, reporter.resendUnacked()) // 아직 타임아웃 전
+        ageAlerts()
+        assertEquals(1, reporter.resendUnacked())
+        assertEquals(listOf(msgId, msgId), notifications.sent.map { it.msgId })
+        ageAlerts()
+        assertEquals(1, reporter.resendUnacked())
+        ageAlerts()
+        assertEquals(0, reporter.resendUnacked()) // 상한(2) 도달
+        assertEquals(3, notifications.sent.size)
+
+        create("shipping:tech".also { jdbc.sql("truncate shipments").update() })
+        val second = notifications.sent.last().msgId
+        mvc.post("/alerts/$second/ack")
+        ageAlerts()
+        assertEquals(0, reporter.resendUnacked()) // ACKED는 재발송하지 않음
+    }
 
     @Test
     fun `T-P1 biz fault records failure, reports one alert with observation ids`() {
@@ -91,6 +116,19 @@ class ShipmentAlertingTest @Autowired constructor(
     }
 
     @Test
+    fun `ack with FAILED status marks FAILED, which is not resent on ack timeout`() {
+        create("shipping:tech")
+        val msgId = notifications.sent.single().msgId
+        mvc.post("/alerts/$msgId/ack") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{"status":"FAILED"}"""
+        }.andExpect { status { isOk() } }
+        assertEquals("FAILED:0", alertStatus(msgId))
+        ageAlerts()
+        assertEquals(0, reporter.resendUnacked())
+    }
+
+    @Test
     fun `T-P4 retry command resends the same payload and counts the retry`() {
         create("shipping:tech")
         val first = notifications.sent.single()
@@ -102,7 +140,7 @@ class ShipmentAlertingTest @Autowired constructor(
     }
 }
 
-@SpringBootTest(properties = ["fault-injection.enabled=false"])
+@SpringBootTest(properties = ["fault-injection.enabled=false", "alert.scheduling.enabled=false"])
 @AutoConfigureMockMvc
 @Import(PostgresTestConfig::class)
 class ShipmentFaultDisabledTest @Autowired constructor(

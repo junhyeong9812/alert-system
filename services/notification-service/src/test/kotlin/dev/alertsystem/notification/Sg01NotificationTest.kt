@@ -32,11 +32,11 @@ class FakeNotifier(override val name: String) : Notifier {
 }
 
 class FakeCallbacks : CallbackClient {
-    val acks = CopyOnWriteArrayList<Pair<String, UUID>>()
+    val acks = CopyOnWriteArrayList<Triple<String, UUID, String>>()
     val retries = CopyOnWriteArrayList<Pair<String, UUID>>()
     @Volatile var retrySucceeds = true
     var onRetry: (UUID) -> Unit = {}
-    override fun ack(callbackUrl: String, msgId: UUID) = acks.add(callbackUrl to msgId)
+    override fun ack(callbackUrl: String, msgId: UUID, status: String) = acks.add(Triple(callbackUrl, msgId, status))
     override fun retry(callbackUrl: String, msgId: UUID): Boolean {
         retries.add(callbackUrl to msgId)
         if (retrySucceeds) onRetry(msgId)
@@ -99,13 +99,13 @@ class Sg01NotificationTest @Autowired constructor(
     }
 
     @Test
-    fun `T-N2 channel failure marks FAILED and does not ack`() {
+    fun `T-N2 channel failure marks FAILED and reports FAILED to the producer`() {
         fakeSlack.succeed = false
         val a = alert()
         inbox.receive(a)
         dispatcher.runOnce()
         assertEquals("FAILED:1:1:0", row(a.msgId))
-        assertEquals(0, callbacks.acks.size)
+        assertEquals(listOf(Triple("http://shipping:8083", a.msgId, "FAILED")), callbacks.acks.toList())
     }
 
     @Test
@@ -114,21 +114,21 @@ class Sg01NotificationTest @Autowired constructor(
         inbox.receive(a)
         dispatcher.runOnce()
         assertEquals("SENT:0:1:0", row(a.msgId))
-        assertEquals(listOf("http://shipping:8083" to a.msgId), callbacks.acks.toList())
+        assertEquals(listOf(Triple("http://shipping:8083", a.msgId, "ACKED")), callbacks.acks.toList())
     }
 
     @Test
-    fun `T-N4 retry batch commands nothing below threshold, every failed msg at threshold`() {
+    fun `T-N4 retry batch commands nothing at threshold, every failed msg above threshold`() {
         fakeSlack.succeed = false
-        val alerts = List(3) { alert() }
-        inbox.receive(alerts[0]); inbox.receive(alerts[1])
+        val alerts = List(4) { alert() }
+        alerts.take(3).forEach(inbox::receive)
         dispatcher.runOnce()
-        assertEquals(0, retryBatch.runOnce())
+        assertEquals(0, retryBatch.runOnce()) // 3건 = 임계(3) — 초과가 아니므로 명령 없음
         assertEquals(0, callbacks.retries.size)
 
-        inbox.receive(alerts[2])
+        inbox.receive(alerts[3])
         dispatcher.runOnce()
-        assertEquals(3, retryBatch.runOnce())
+        assertEquals(4, retryBatch.runOnce())
         assertEquals(alerts.map { it.msgId }.toSet(), callbacks.retries.map { it.second }.toSet())
         alerts.forEach { assertEquals("RETRY_REQUESTED:1:1:1", row(it.msgId)) }
     }
@@ -136,7 +136,7 @@ class Sg01NotificationTest @Autowired constructor(
     @Test
     fun `failed retry command reverts to FAILED`() {
         fakeSlack.succeed = false
-        val alerts = List(3) { alert() }
+        val alerts = List(4) { alert() }
         alerts.forEach(inbox::receive)
         dispatcher.runOnce()
         callbacks.retrySucceeds = false
@@ -147,7 +147,7 @@ class Sg01NotificationTest @Autowired constructor(
     @Test
     fun `T-N5 producer resend after a retry command is dispatched again`() {
         fakeSlack.succeed = false
-        val alerts = List(3) { alert() }
+        val alerts = List(4) { alert() }
         alerts.forEach(inbox::receive)
         dispatcher.runOnce()
         // 생산자가 재시도 명령을 받으면 같은 payload를 재전송한다
@@ -167,6 +167,16 @@ class Sg01NotificationTest @Autowired constructor(
         jdbc.sql("update inbox set status = 'SENDING', updated_at = now() - interval '2 minutes'").update()
         assertEquals(1, inbox.recoverStale(60))
         assertEquals("RECEIVED:0:1:0", row(a.msgId))
+    }
+
+    @Test
+    fun `critical alert still tries email when slack fails`() {
+        fakeSlack.succeed = false
+        val critical = alert("critical")
+        inbox.receive(critical)
+        dispatcher.runOnce()
+        assertEquals(listOf(critical.msgId), fakeEmail.sent)
+        assertEquals("FAILED:1:1:0", row(critical.msgId))
     }
 
     @Test

@@ -39,6 +39,7 @@ type Record struct {
 	Mode       string          `json:"mode"`
 	Status     int             `json:"status"`
 	Body       json.RawMessage `json:"body"`
+	Error      string          `json:"error,omitempty"` // sink가 본문을 끝까지 받지 못한 경우
 }
 
 // 러너가 남기는 장애 주입 이벤트 (scripts/run-experiment.sh).
@@ -46,6 +47,7 @@ type Event struct {
 	T      time.Time `json:"t"`
 	Event  string    `json:"event"`
 	Detail string    `json:"detail,omitempty"`
+	Expect string    `json:"expect,omitempty"` // 이 장애를 감지했다고 볼 운영 알림 제목 패턴 (예: "ServiceDown shipping")
 }
 
 type domainBody struct {
@@ -121,6 +123,7 @@ type Report struct {
 	FlowStages map[string]FlowStats `json:"flowStages"`
 	Alerts     AlertStats           `json:"alerts"`
 	Ops        []OpsAlert           `json:"opsAlerts"`
+	SinkErrors int                  `json:"sinkReadErrors"` // 본문 수신 실패로 어떤 알림인지 알 수 없는 기록 (측정 불확실성)
 	Detections []Detection          `json:"detections"`
 	Events     []Event              `json:"events"`
 	Skipped    int                  `json:"skippedLines"`
@@ -221,6 +224,10 @@ func Analyze(runID string, expected []Expected, records []Record, events []Event
 	accepted := map[string]int{}
 	firstAccepted := map[string]time.Time{}
 	for _, rec := range records {
+		if rec.Error != "" {
+			rep.SinkErrors++
+			continue
+		}
 		var b domainBody
 		_ = json.Unmarshal(rec.Body, &b)
 		p := b.Metadata.EventPayload
@@ -302,12 +309,14 @@ func flowStats(es []Expected) FlowStats {
 func detections(events []Event, ops []OpsAlert) []Detection {
 	var out []Detection
 	for _, ev := range events {
-		if !strings.HasPrefix(ev.Event, "fault:") {
+		// 기대 알림 패턴이 있는 장애만 감지 시간을 잰다 (없으면 무관한 알림이 '감지'로 잡힌다)
+		if !strings.HasPrefix(ev.Event, "fault:") || ev.Expect == "" {
 			continue
 		}
 		d := Detection{Event: ev.Event + " " + ev.Detail, EventAt: ev.T.UTC().Format(time.RFC3339)}
 		for _, o := range ops {
-			if o.ReceivedAt.After(ev.T) && o.Status == 200 && strings.Contains(strings.ToUpper(o.Title), "FIRING") {
+			if o.ReceivedAt.After(ev.T) && o.Status == 200 && strings.Contains(strings.ToUpper(o.Title), "FIRING") &&
+				strings.Contains(o.Title, ev.Expect) {
 				s := o.ReceivedAt.Sub(ev.T).Seconds()
 				d.FirstOpsAlert, d.Seconds = o.Title, &s
 				break
